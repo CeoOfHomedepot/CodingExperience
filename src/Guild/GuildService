@@ -1,0 +1,338 @@
+local MessagingService = game:GetService("MessagingService")
+local MemoryService = game:GetService("MemoryStoreService")
+local DatastoreService = game:GetService("DataStoreService")
+local HttpService = game:GetService("HttpService")
+
+local GuildLocks = MemoryService:GetSortedMap("GuildLocks")
+
+
+local GuildDataStore = DatastoreService:GetDataStore("GuildDataV1")
+local GuildNameRegistry = DatastoreService:GetDataStore("GuildNameRegistryV1")
+local GuildSearch = DatastoreService:GetOrderedDataStore("GuildSearchV1")
+
+local GuildService = {}
+
+GuildService.Guilds = {}
+GuildService.GuildConnections = {}
+
+function GuildService:Lock(GuildID: string)
+	local LockKey = "Lock_" .. GuildID
+	
+	local Success, Result = pcall(function()
+		return GuildLocks:UpdateAsync(LockKey, function(CurrentValue)
+			if CurrentValue then
+				return nil
+			end
+			
+			return true
+		end, 10)
+	end)
+	
+	return Success and Result == true
+end
+
+function GuildService:Unlock(GuildID: string)
+	local LockKey = "Lock_" .. GuildID
+	
+	pcall(function()
+		return GuildLocks:RemoveAsync(LockKey)
+	end)
+end
+
+function GuildService:IsNameTaken(GuildID: string, NormalizedName: string) : boolean
+	local NameClaimed = false
+	
+	local Success, Error = pcall(function()
+		GuildNameRegistry:UpdateAsync(NormalizedName, function(ExisitingID)
+			if ExisitingID then
+				return nil
+			else
+				NameClaimed  = true
+				return GuildID
+			end
+		end)
+	end)
+	
+	return Success, NameClaimed
+end
+
+-- Cache --
+function GuildService:Cache(GuildID: string, Player: Player, GuildHandler)
+	if not GuildService.Guilds[GuildID] then 
+		GuildService.Guilds[GuildID] = {}
+		GuildService:SubscribeGuild(GuildID)
+	end
+	
+	GuildService.Guilds[GuildID][Player] = GuildHandler
+end
+
+function GuildService:RemoveFromCache(GuildID: string, Player: Player)
+	if not GuildService.Guilds[GuildID] then return end
+	if not GuildService.Guilds[GuildID][Player] then return end
+	
+	GuildService.Guilds[GuildID][Player] = nil
+	
+	if #GuildService.Guilds[GuildID] == 0 then
+		GuildService:RemoveGuildCache(GuildID)
+	end
+end
+
+function GuildService:RemoveGuildCache(GuildID: string)
+	GuildService.Guilds[GuildID] = nil
+end
+-- Cache --
+
+-- Data Store --
+function GuildService:Create(Owner: Player, Name: string) : (boolean, string, {})
+	if type(Name) ~= "string" then
+		warn("Guild name must be a string")
+		return false
+	end
+	
+	local Filtered, NormalizedName = GuildService:NormalizeName(Name)
+	
+	if not Filtered then
+		warn("Guild name has been filtered", NormalizedName)
+		return false
+	end
+	
+	if string.len(NormalizedName) <= 2 then
+		warn("Guild name must be at least 3 characters long")
+		return false
+	elseif string.len(NormalizedName) > 20 then
+		warn("Guild name must be less than 21 characters long")
+		return false
+	end
+	
+	local GuildID = HttpService:GenerateGUID(false)
+	local NameCheckSuccess, NameClaimed = GuildService:IsNameTaken(GuildID, NormalizedName)
+	
+	if not NameCheckSuccess or not NameClaimed then
+		warn("Guild Name is taken or an error has occured")
+		return false, "Name Taken"
+	end
+	
+	local GuildData = {
+		GuildID = GuildID,
+		Name = Name,
+		OwnerID = tostring(Owner.UserId),
+		Members = {
+			[tostring(Owner.UserId)] = 255
+		},
+		Bank = {},
+		Level = 1,
+		Experience = 0
+	}
+	
+	local Success, Error = pcall(function()
+		return GuildDataStore:SetAsync(GuildID, GuildData)
+	end)
+	
+	if not Success then
+		pcall(function()
+			GuildNameRegistry:RemoveAsync(NormalizedName)
+		end)
+		
+		warn("Guild Creation has failed...", Error)
+		return false, "Data Error"
+	end
+	
+	pcall(function()
+		return GuildSearch:SetAsync(GuildID, 1)
+	end)
+	
+	return true, GuildID, GuildData
+end
+
+function GuildService:Disband(GuildID: string, Caller: Player) : boolean
+	local HasLock = GuildService:Lock(GuildID)
+	
+	if not HasLock then
+		warn("Guild is busy")
+		return false
+	end
+	
+	local Success, CallerApproved, Name = pcall(function()
+		local Approved = false
+		local Name = ""
+		
+		GuildDataStore:UpdateAsync(GuildID, function(Data)
+			if not Data then return nil end
+			
+			Approved = Data.OwnerID == tostring(Caller.UserId)
+			Name = Data.Name
+			
+			return nil
+		end)
+
+		return Approved, Name
+	end)
+	
+	--print(Success, CallerApproved, Name)
+	
+	if not Success or not CallerApproved then
+		warn("Caller is not the owner")
+		return false
+	end
+	
+	local NormalizedName = GuildService:NormalizeName(Name)
+	
+	local Success, Error = pcall(function()
+		GuildDataStore:RemoveAsync(GuildID)
+		GuildSearch:RemoveAsync(GuildID)
+		GuildNameRegistry:RemoveAsync(NormalizedName)
+	end)
+end
+
+function GuildService:Join(GuildID: string, Player: Player) : boolean
+	local HasLock = GuildService:Lock(GuildID)
+	
+	if not HasLock then
+		warn("Guild is busy")
+		return false
+	end
+	
+	local Success, Error = pcall(function()
+		GuildDataStore:UpdateAsync(GuildID, function(Data)
+			if not Data then return nil end
+			
+			local IsMember = Data.Members[tostring(Player.UserId)]
+			if IsMember then return nil end
+			
+			Data.Members[tostring(Player.UserId)] = 1
+			return Data
+		end)
+	end)
+	
+	GuildService:Unlock(GuildID)
+	
+	if not Success then
+		warn("Guild Join has failed...", Error)
+		return false
+	end
+	
+	return true
+end
+
+function GuildService:Leave(GuildID: string, Player: Player) : boolean
+	local HasLock = GuildService:Lock(GuildID)
+	
+	if not HasLock then
+		warn("Guild is busy")
+		return false
+	end
+	
+	local Success, Error = pcall(function()
+		GuildDataStore:UpdateAsync(GuildID, function(Data)
+			if not Data then return nil end
+			
+			local IsMember = Data.Members[tostring(Player.UserId)]
+			
+			if not IsMember then return nil end
+			
+			Data.Members[tostring(Player.UserId)] = nil
+			return Data
+		end)
+	end)
+	
+	GuildService:Unlock(GuildID)
+	
+	if not Success then
+		warn("Guild Leave has failed...", Error)
+		return false
+	end
+	
+	return true
+end
+
+function GuildService:Kick(GuildID: string, PlayerID: number, CallerRank: number) : boolean
+	local HasLock = GuildService:Lock(GuildID)
+	
+	if not HasLock then
+		warn("Guild is busy")
+		return false
+	end
+	
+	local Success, Error = pcall(function()
+		GuildDataStore:UpdateAsync(GuildID, function(Data)
+			if not Data then return nil end
+			
+			local TargetRank = Data.Members[tostring(PlayerID)]
+			
+			if not TargetRank or TargetRank >= CallerRank then return nil end
+			
+			Data.Members[tostring(PlayerID)] = nil
+			return Data
+		end)
+	end)
+	
+	GuildService:Unlock(GuildID)
+	
+	if not Success then
+		warn("Guild Kick has failed...", Error)
+		return false
+	end
+	
+	return true
+end
+
+function GuildService:GetData(GuildID: string) : {} | nil
+	local Success, Data = pcall(function()
+		return GuildDataStore:GetAsync(GuildID)
+	end)
+	
+	if Success and Data then
+		return Data
+	end
+	
+	return nil
+end
+-- Data Store --
+
+-- Messaging Service --
+function GuildService:SubscribeGuild(GuildID: string)
+	local Success, Connection = pcall(function()
+		return MessagingService:SubscribeAsync(GuildID, function(Message)
+			if Message.Data.Payload == "Chat" then -- Payload can be Message, Leave, Kick, Join, Promote, etc
+				print("Message Recieved!", GuildID, Message.Data.Body, Message.Data.Sender)
+			end
+		end)
+	end)
+	
+	if Success and Connection then
+		GuildService.GuildConnections[GuildID] = Connection
+	end
+end
+
+function GuildService:UnsubscribeGuild(GuildID: string)
+	GuildService.GuildConnections[GuildID]:Disconnect()
+	GuildService.GuildConnections[GuildID] = nil
+end
+
+function GuildService:PublishGuild(GuildID: string, Payload: {})
+	local Success, Error = pcall(function()
+		MessagingService:PublishAsync(GuildID, Payload)
+	end)
+end
+-- Messaging Service --
+
+function GuildService:NormalizeName(Name: string) : (boolean, string)
+	if string.match(Name, "%s%s") then
+		return false, "Guild name cannot contain multiple spaces in a row."
+	end
+	
+	if string.match(Name, "%d") then
+		return false, "Guild name cannot contain numbers."
+	end
+
+	if string.match(Name, "[^%a%s]") then
+		return false, "Guild name cannot contain special characters."
+	end
+
+	local SingleSpaces = string.gsub(Name, "%s+", " ")
+	local NormalizedName = string.lower(string.match(SingleSpaces, "^%s*(.-)%s*$") or "")
+
+	return true, NormalizedName
+end
+
+return GuildService
