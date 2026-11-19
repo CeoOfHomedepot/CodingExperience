@@ -1,0 +1,88 @@
+--!native
+--!optimize 2
+
+local ServerScriptService = game:GetService("ServerScriptService")
+local Players = game:GetService("Players")
+
+local SharedTableModule = require(ServerScriptService.Modules.SharedTable)
+--local AIBase = require(ServerScriptService.Modules.AIBase)
+local MapGridHandler = require(ServerScriptService.Modules.MapGridHandler)
+local HitProcessHandler = require(ServerScriptService.Modules.HitProcessHandler)
+
+local PlayerCheckParam = OverlapParams.new()
+PlayerCheckParam.FilterType = Enum.RaycastFilterType.Include
+PlayerCheckParam.FilterDescendantsInstances = {workspace.Characters}
+PlayerCheckParam.CollisionGroup = "PlayerHumanoid"
+
+
+local HitDetectionHandler = {}
+
+function HitDetectionHandler:GetNearestPlayers(AI) : {Player}
+	local Results = workspace:GetPartBoundsInBox(AI.Rotation, MapGridHandler.ThreeGridCheck, PlayerCheckParam)
+	local PlayersHit = {}
+	
+	for i, HumanoidRootPart in ipairs(Results) do
+		local Character = HumanoidRootPart.Parent
+		local Player = Players:GetPlayerFromCharacter(Character)
+		
+		if Player then
+			PlayersHit[i] = Player 
+		end
+	end
+	
+	return PlayersHit :: {Player}
+end
+
+function HitDetectionHandler:HitDetection(Caster, Position: Vector3, RangeSq: number, HitboxData: {}, Data: {}) : boolean
+	local HitSomething = false
+	local PosX = Position.X
+	local PosZ = Position.Z
+	local IgnoreSet = HitboxData.Ignore or {}
+	local HitIgnore = HitboxData.HitIgnore or {}
+
+	if not HitIgnore[1] then
+		local Cells = MapGridHandler:GetNeighboringCells(PosX, PosZ)
+
+		for _, GridIndex in ipairs(Cells) do
+			local CellHead = MapGridHandler.Grid[GridIndex]
+
+			while CellHead do
+				local NextAI = CellHead.NextAI
+
+				if not CellHead:HasFlag(64) and CellHead.Model and not IgnoreSet[CellHead.ID] then
+					local DiffX = CellHead.ExpectedPosition.X - PosX
+					local DiffZ = CellHead.ExpectedPosition.Z - PosZ
+
+					if (DiffX * DiffX) + (DiffZ * DiffZ) <= RangeSq then
+						HitProcessHandler:HandleHit(Caster, CellHead, HitboxData)
+						HitSomething = true
+					end
+				end
+
+				CellHead = NextAI
+			end
+		end
+	end
+
+	if not HitIgnore[0] then
+		for _, Character in pairs(SharedTableModule.Characters) do
+			if Character ~= Caster and not IgnoreSet[Character] then
+				local HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+				
+				if HumanoidRootPart then
+					local DiffX = HumanoidRootPart.Position.X - PosX
+					local DiffZ = HumanoidRootPart.Position.Z - PosZ
+
+					if (DiffX * DiffX) + (DiffZ * DiffZ) <= RangeSq then
+						HitProcessHandler:HandleHit(Caster, Character, HitboxData)
+						HitSomething = true
+					end
+				end
+			end
+		end
+	end
+
+	return HitSomething
+end
+
+return HitDetectionHandler
