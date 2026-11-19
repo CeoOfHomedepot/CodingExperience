@@ -1,0 +1,121 @@
+-- Services --
+local ServerScriptService = game:GetService("ServerScriptService")
+local ServerStorage = game:GetService("ServerStorage")
+local AnalyticsService = game:GetService("AnalyticsService")
+-- Services --
+
+-- Modules --
+local QuestData = require(ServerScriptService.Modules.Data.QuestData)
+local TimedQuest = require(ServerScriptService.Modules.QuestBase.TimedQuest)
+local KillQuest = require(ServerScriptService.Modules.QuestBase.KillQuest)
+local FetchQuest = require(ServerScriptService.Modules.QuestBase.FetchQuest)
+local GlobalSignals = require(ServerScriptService.Modules.GlobalSignals)
+-- Modules --
+
+local QuestHandler = {}
+QuestHandler.__index = QuestHandler
+
+function QuestHandler.New(Player: Player, PlayerHandler)
+	local self = setmetatable({}, QuestHandler)
+	
+	self.Player = Player
+	self.PlayerHandler = PlayerHandler
+	
+	self.ActiveQuests = {}
+	self.CompletedQuests = {}
+	
+	self:Init()
+	return self
+end
+
+function QuestHandler:ToTable(Sync)
+	local IsSync = Sync or false
+	local Table = {
+		Active = {},
+		Completed = self.CompletedQuests
+	}
+	
+	for Index, Quest in pairs(self.ActiveQuests) do
+		Table.Active[Index] = Quest:ToTable(IsSync)
+	end
+	
+	return Table
+end
+
+function QuestHandler:Init()
+	print(script.Name .. " Init Data...", self.Player)
+
+	local HandlerData = self.PlayerHandler.Profile.Data.QuestHandler
+	self.CompletedQuests = HandlerData.Completed
+	
+	for i = 1, #HandlerData.Active do
+		local ID = HandlerData.Active[i].ID
+	
+		self:StartQuest(ID)
+		
+		if HandlerData.Active[i].Status then
+			self.ActiveQuests[ID].Status = HandlerData.Active[i].Status
+		elseif HandlerData.Active[i].Progress then
+			self.ActiveQuests[ID].Progress = HandlerData.Active[i].Progress
+		end
+	end
+
+	print(script.Name .. " Data Initialized...", self.Player, self)
+end
+
+function QuestHandler:StartQuest(QuestId: number)
+	local QuestData = QuestData[QuestId]
+	
+	local Quest
+	if QuestData then
+		if QuestData.Type == "Kill" then
+			Quest = KillQuest.New(QuestData)
+		elseif QuestData.Type == "Timed" then
+			Quest = TimedQuest.New(QuestData)
+		elseif QuestData.Type == "Fetch" then
+			Quest = FetchQuest.New(QuestData)
+		end
+	end
+	
+	print("Starting new quest", Quest)
+	self.ActiveQuests[QuestId] = Quest
+end
+
+function QuestHandler:NotifyKill(Entity: string)
+	for _, Quest in pairs(self.ActiveQuests) do
+		if Quest.OnKill then
+			Quest:OnKill(Entity)
+			
+			if Quest.Status == "Completed" then
+				self:ClaimReward(Quest.Config.Id)
+			end
+		end
+	end
+end
+
+function QuestHandler:ClaimReward(QuestId)
+	local Quest = self.ActiveQuests[QuestId]
+	
+	if Quest and Quest.Status == "Completed" then
+		self.CompletedQuests[QuestId] = true
+		self.ActiveQuests[QuestId] = nil
+		
+		if Quest.Config.XpReward then
+			GlobalSignals.XPGained:Fire(self.Player, Quest.Config.XpReward)
+		end
+		
+		if Quest.Config.NextQuestId then
+			self:StartQuest(Quest.Config.NextQuestId)
+		end
+	end
+end
+
+function QuestHandler:Destroy()
+	print("Cleaning up Quest Handler")
+	
+	self.Player = nil
+	setmetatable(self, nil)
+	table.clear(self)
+end
+
+return QuestHandler
