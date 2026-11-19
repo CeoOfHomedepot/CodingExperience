@@ -1,0 +1,76 @@
+-- Services --
+local ServerScriptService = game:GetService("ServerScriptService")
+-- Services --
+
+-- Modules --
+local GuildService = require(ServerScriptService.Modules.GuildService)
+-- Modules --
+
+local GuildHandler = {}
+GuildHandler.__index = GuildHandler
+
+function GuildHandler.New(Player: Player, PlayerHandler)
+	local self = setmetatable({}, GuildHandler)
+	
+	self.Player = Player
+	self.PlayerHandler = PlayerHandler
+	
+	self.GuildID = nil
+	self.Rank = nil
+	
+	self:Init()
+	return self
+end
+
+function GuildHandler:SendMessage(Message: string)	
+	local PayloadData = {}
+	PayloadData.Payload = "Chat"
+	PayloadData.Body = Message
+	PayloadData.Sender = self.Player.Name
+	
+	GuildService:PublishGuild(self.GuildID, PayloadData)
+end
+
+function GuildHandler:Join(GuildID: string, Rank: number)
+	self.GuildID = GuildID
+	self.Rank = Rank
+	
+	GuildService:Cache(self.GuildID, self.Player, self)
+end
+
+function GuildHandler:ToTable() : {}
+	return {
+		GuildID = self.GuildID,
+	}
+end
+
+function GuildHandler:Init()
+	print(script.Name .. " Init Data...", self.Player)
+	
+	local HandlerData = self.PlayerHandler.Profile.Data.GuildHandler
+	self.GuildID = HandlerData.GuildID
+	
+	if self.GuildID ~= nil then
+		local Data = GuildService:GetData(self.GuildID)
+		
+		self.Rank = Data.Members[tostring(self.Player.UserId)]
+		
+		if self.Rank == nil then
+			warn("Player was kicked out...")
+			self.GuildID = nil
+		end
+	end
+	
+	print(script.Name .. " Data Initialized...", self.Player, self)
+end
+
+function GuildHandler:Destroy()
+	print("Cleaning up", script.Name)
+	
+	self.Player = nil
+	self.PlayerHandler = nil
+	setmetatable(self, nil)
+	table.clear(self)
+end
+
+return GuildHandler
