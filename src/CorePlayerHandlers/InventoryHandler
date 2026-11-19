@@ -1,0 +1,218 @@
+-- Services --
+local ServerScriptService = game:GetService("ServerScriptService")
+local HttpService = game:GetService("HttpService")
+-- Services --
+
+-- Modules --
+local ItemData = require(ServerScriptService.Modules.Data.ItemData)
+local Item = require(ServerScriptService.Modules.ItemBase)
+local Equipment = require(ServerScriptService.Modules.ItemBase.Equipment)
+local Consumable = require(ServerScriptService.Modules.ItemBase.Consumable)
+local GlobalSignal = require(ServerScriptService.Modules.GlobalSignals)
+-- Modules --
+
+local InventoryHandler = {}
+InventoryHandler.__index = InventoryHandler
+
+-- Config --
+local MAX_SLOTS = 30
+-- Config --
+
+function InventoryHandler.New(Player: Player, PlayerHandler)
+	local self = setmetatable({}, InventoryHandler)
+	
+	self.Player = Player
+	self.PlayerHandler = PlayerHandler
+	
+	self.MaxSlots = 30
+	self.Slots = {}
+	self.Equipped = {
+		["Head"] = nil,
+		["Torso"] = nil,
+		["Leggings"] = nil,
+		["Boots"] = nil,
+		["Ring1"] = nil,
+		["Ring2"] = nil,
+		["Amulet"] = nil,
+		["MainHand"] = nil,
+		["OffHand"] = nil
+	}
+	
+	self:Init()
+	return self
+end
+
+function InventoryHandler:GetFirstEmptySlot()
+	local OccupiedSlots = {}
+	for _, ItemObject in self.Slots do
+		if ItemObject.Slot then
+			OccupiedSlots[ItemObject.Slot] = true
+		end
+	end
+
+	for i = 1, self.MaxSlots do
+		if not OccupiedSlots[i] then
+			return i
+		end
+	end
+
+	return nil
+end
+
+function InventoryHandler:GetTotalItems() : number
+	local Total = 0
+	
+	for _ in self.Slots do
+		Total += 1
+	end
+	
+	return Total
+end
+
+function InventoryHandler:CreateItemObject(ID: string, Quantity: number, Slot: number, Stats: {})
+	local Config = ItemData[ID]
+	local Data = {ID = ID, Slot = Slot, Quantity = Quantity, Stats = Stats}
+	
+	if Config and Config.BaseStats then
+		Data.BaseStats = Config.BaseStats
+	end
+	
+	if Config.Type == "Weapon" or Config.Type == "Gear" then
+		return Equipment.New(Data)
+	elseif Config.Type == "Consumable" then
+		return Consumable.New(Data)
+	else
+		return Item.New(Data)
+	end
+end
+
+function InventoryHandler:AddItem(ItemId: string, Amount: number)
+	local Config = ItemData[ItemId]
+	Amount = Amount or 1
+	
+	if Config.Stackable then
+		for _, ItemObject in self.Slots do
+			if ItemObject.ID == Config.ID and ItemObject.Quantity < Config.MaxStack then
+				local CanAdd = math.min(Amount, Config.MaxStack - ItemObject.Quantity)
+				ItemObject.Quantity += CanAdd
+				Amount -= CanAdd
+				if Amount <= 0 then return end
+			end
+		end
+	end
+	
+	while Amount > 0 do
+		local EmptySlot = self:GetFirstEmptySlot()
+		
+		if not EmptySlot then
+			warn("Inventory is full")
+			break
+		end
+		
+		local NewStackQuantity = math.min(Amount, Config.MaxStack or 1)
+		local NewItem = self:CreateItemObject(ItemId, NewStackQuantity, EmptySlot, {})
+		
+		if NewItem.GenerateRandomStats then
+			NewItem:GenerateRandomStats()
+		end
+		
+		if not NewItem.UUID then
+			if NewItem.GenerateUUID then
+				NewItem:GenerateUUID()
+			else
+				NewItem.UUID = HttpService:GenerateGUID(false)
+			end
+		end
+		
+		self.Slots[NewItem.UUID] = NewItem
+		Amount -= NewStackQuantity
+	end
+	
+	return Amount <= 0
+end
+
+function InventoryHandler:Equip(Item: {})
+	local Data = ItemData[Item.ID]
+	local Slot = Data.SlotType
+	
+	if not Slot then return end
+	
+	print("Attempting to equip: " .. Item.ID)
+	
+	if self.Equipped[Slot] == Item then
+		self.Equipped[Slot] = nil
+	else
+		self.Equipped[Slot] = Item
+	end
+	
+	GlobalSignal.StatsChanged:Fire(self.Player)
+	-- TODO: Send event for stat update
+end
+
+function InventoryHandler:SearchByUUID(UUID: string)
+	local FoundItem = self.Slots[UUID]
+	
+	if FoundItem then return FoundItem end
+	
+	return nil
+end
+
+function InventoryHandler:SearchByItemID(ItemID: string)
+	local Results = {}
+	
+	for _, ItemObject in self.Slots do
+		if ItemObject.ID == ItemID then
+			table.insert(Results, ItemObject)
+		end
+	end
+	
+	return Results
+end
+
+function InventoryHandler:ToTable()
+	local Table = {
+		Slots = {},
+		Equipped = {}
+	}
+	
+	for UUID, ItemObject in self.Slots do
+		Table.Slots[UUID] = ItemObject:ToTable()
+	end
+	
+	for SlotName, ItemObject in self.Equipped do
+		if not ItemObject then continue end
+		
+		Table.Equipped[SlotName] = ItemObject.UUID
+	end
+	
+	return Table
+end
+
+function InventoryHandler:Init()
+	print(script.Name .. " Init Data...", self.Player)
+	
+	local HandlerData = self.PlayerHandler.Profile.Data.InventoryHandler
+	self.Slots = HandlerData.Slots
+	
+	for UUID, ItemData in self.Slots do
+		local ItemObject = self:CreateItemObject(ItemData.ID, ItemData.Quantity, ItemData.Slot, ItemData.Stats)
+		
+		if ItemData.Sockets then
+			ItemObject.Sockets = ItemData.Sockets
+		end
+		
+		self.Slots[UUID] = ItemObject
+	end
+	
+	self.Equipped = HandlerData.Equipped
+
+	print(script.Name .. " Data Initialized...", self.Player, self)
+end
+
+function InventoryHandler:Destroy()
+	print("Cleaning up Inventory Handler")
+	self.Player = nil
+	setmetatable(self, nil)
+end
+
+return InventoryHandler
